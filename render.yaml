@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: merge-service
+    env: node
+    buildCommand: npm install && npm run build
+    startCommand: npm run serve
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: MERGE_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: BUCKET_NAME
+        value: merged-images
+      - key: UPLOAD_PREFIX
+        value: merged
+      - key: TARGET_WIDTH
+        value: 1024
+    healthCheckPath: /health
