@@ -65,46 +65,111 @@ async function downloadBuffer(url: string): Promise<Buffer> {
 
 /**
  * Compose two images vertically on a white background
+ * Ensures output has a valid aspect ratio for Kling AI (4:3)
  */
 async function composeVertical(upperBuf: Buffer, lowerBuf: Buffer, targetWidth = 1024): Promise<Buffer> {
   try {
     console.log(`Composing images with target width: ${targetWidth}`);
-    
-    // Resize images to target width
-    const up = await sharp(upperBuf)
-      .resize({ width: targetWidth })
+    console.log(`Initial buffer sizes: upper=${upperBuf.length}, lower=${lowerBuf.length}`);
+
+    // Define the final 4:3 aspect ratio dimensions
+    const finalWidth = targetWidth;
+    const finalHeight = Math.round(targetWidth * 0.75); // 4:3 aspect ratio
+    console.log(`Target canvas dimensions: ${finalWidth}x${finalHeight}`);
+
+    // Resize upper and lower images to fit within the final dimensions while preserving aspect ratio
+    const resizedUpper = await sharp(upperBuf)
+      .resize({
+        width: finalWidth,
+        height: finalHeight,
+        fit: 'inside', // preserve aspect ratio, fit within dimensions
+        withoutEnlargement: true // don't enlarge smaller images
+      })
       .toBuffer();
-      
-    const lw = await sharp(lowerBuf)
-      .resize({ width: targetWidth })
+
+    const resizedLower = await sharp(lowerBuf)
+      .resize({
+        width: finalWidth,
+        height: finalHeight,
+        fit: 'inside',
+        withoutEnlargement: true
+      })
       .toBuffer();
-    
-    // Get metadata for each image
+
+    // Get metadata of the resized images to calculate placement
     const [upMeta, lwMeta] = await Promise.all([
-      sharp(up).metadata(),
-      sharp(lw).metadata()
+      sharp(resizedUpper).metadata(),
+      sharp(resizedLower).metadata()
     ]);
-    
-    if (!upMeta.height || !lwMeta.height) {
-      throw new Error('Failed to get image metadata');
+
+    if (!upMeta.height || !upMeta.width || !lwMeta.height || !lwMeta.width) {
+      throw new Error('Failed to get resized image metadata');
     }
-    
+
+    console.log(`Resized upper image dimensions: ${upMeta.width}x${upMeta.height}`);
+    console.log(`Resized lower image dimensions: ${lwMeta.width}x${lwMeta.height}`);
+
+    // Calculate total height and scaling factor if needed
     const totalHeight = upMeta.height + lwMeta.height;
-    
-    // Create a new image with both parts on white background
+    let topOffset = 0;
+    let bottomTopOffset = upMeta.height;
+
+    // If the combined height exceeds the final height, we need to scale them down
+    if (totalHeight > finalHeight) {
+      console.log(`Combined height ${totalHeight} exceeds target height ${finalHeight}. Scaling down.`);
+      const scale = finalHeight / totalHeight;
+      const scaledUpHeight = Math.round(upMeta.height * scale);
+      bottomTopOffset = scaledUpHeight;
+
+      console.log(`Scaling factor: ${scale}. New upper height: ${scaledUpHeight}, New lower height: ${Math.round(lwMeta.height * scale)}`);
+
+      // Re-process images with scaling if they overflow
+      const scaledUpper = await sharp(resizedUpper).resize({ height: scaledUpHeight }).toBuffer();
+      const scaledLower = await sharp(resizedLower).resize({ height: Math.round(lwMeta.height * scale) }).toBuffer();
+
+      const finalUpperMeta = await sharp(scaledUpper).metadata();
+      const finalLowerMeta = await sharp(scaledLower).metadata();
+      console.log(`Final scaled dimensions: upper=${finalUpperMeta.width}x${finalUpperMeta.height}, lower=${finalLowerMeta.width}x${finalLowerMeta.height}`);
+
+      const merged = await sharp({
+        create: {
+          width: finalWidth,
+          height: finalHeight,
+          channels: 4,
+          background: { r: 255, g: 255, b: 255, alpha: 1 }
+        }
+      })
+      .composite([
+        { input: scaledUpper, top: 0, left: Math.floor((finalWidth - finalUpperMeta.width!) / 2) },
+        { input: scaledLower, top: bottomTopOffset, left: Math.floor((finalWidth - finalLowerMeta.width!) / 2) }
+      ])
+      .png()
+      .toBuffer();
+
+      return merged;
+    } else {
+      // If they fit, center them vertically
+      topOffset = Math.floor((finalHeight - totalHeight) / 2);
+      bottomTopOffset = topOffset + upMeta.height;
+      console.log(`Combined height ${totalHeight} fits within target height ${finalHeight}. Centering vertically.`);
+    }
+
+    console.log(`Final canvas: ${finalWidth}x${finalHeight}. Placing upper at y=${topOffset}, lower at y=${bottomTopOffset}`);
+
+    // Create a new 4:3 image with a white background and composite the two images
     const merged = await sharp({
       create: {
-        width: targetWidth,
-        height: totalHeight,
-        channels: 4,
-        background: { r: 255, g: 255, b: 255, alpha: 1 }
+        width: finalWidth,
+        height: finalHeight,
+        channels: 4, // Use 4 channels for PNG with alpha
+        background: { r: 255, g: 255, b: 255, alpha: 1 } // White background
       }
     })
     .composite([
-      { input: up, top: 0, left: 0 },
-      { input: lw, top: upMeta.height, left: 0 }
+      { input: resizedUpper, top: topOffset, left: Math.floor((finalWidth - upMeta.width!) / 2) },
+      { input: resizedLower, top: bottomTopOffset, left: Math.floor((finalWidth - lwMeta.width!) / 2) }
     ])
-    .png()
+    .png() // Output as PNG
     .toBuffer();
     
     return merged;
